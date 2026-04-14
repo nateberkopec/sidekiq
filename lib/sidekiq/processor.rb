@@ -251,29 +251,72 @@ module Sidekiq
 
     # jruby's Hash implementation is not threadsafe, so we wrap it in a mutex here
     class SharedWorkState
+      THREAD_KEY = :sidekiq_work_state
+      BUFFER_KEY = :sidekiq_work_state_buffer
+      REGISTERED_KEY = :sidekiq_work_state_registered
+
       def initialize
-        @work_state = {}
+        @threads = {}
         @lock = Mutex.new
       end
 
-      def set(tid, hash)
-        @lock.synchronize { @work_state[tid] = hash }
+      def set(tid, queue, payload = nil, run_at = nil)
+        thread = Thread.current
+        state = thread[BUFFER_KEY] ||= {}
+
+        if payload.nil? && run_at.nil? && queue.is_a?(Hash)
+          state.replace(queue)
+        else
+          state[:queue] = queue
+          state[:payload] = payload
+          state[:run_at] = run_at
+        end
+
+        thread[THREAD_KEY] = state
+        return if thread[REGISTERED_KEY]
+
+        @lock.synchronize { @threads[tid] = thread }
+        thread[REGISTERED_KEY] = true
       end
 
       def delete(tid)
-        @lock.synchronize { @work_state.delete(tid) }
+        Thread.current[THREAD_KEY] = nil
       end
 
       def dup
-        @lock.synchronize { @work_state.dup }
+        current_work_state
       end
 
       def size
-        @lock.synchronize { @work_state.size }
+        current_work_state.size
       end
 
       def clear
-        @lock.synchronize { @work_state.clear }
+        threads = @lock.synchronize do
+          registered = @threads.values
+          @threads = {}
+          registered
+        end
+
+        threads.each do |thread|
+          thread[THREAD_KEY] = nil
+          thread[BUFFER_KEY] = nil
+          thread[REGISTERED_KEY] = nil
+        end
+      end
+
+      private
+
+      def current_work_state
+        threads = @lock.synchronize do
+          @threads.delete_if { |_, thread| !thread.alive? }
+          @threads.dup
+        end
+
+        threads.each_with_object({}) do |(tid, thread), work_state|
+          state = thread[THREAD_KEY]
+          work_state[tid] = state.dup if state
+        end
       end
     end
 
@@ -282,7 +325,8 @@ module Sidekiq
     WORK_STATE = SharedWorkState.new
 
     def stats(jobstr, queue)
-      WORK_STATE.set(tid, {queue: queue, payload: jobstr, run_at: Time.now.to_i})
+      run_at = ::Process.clock_gettime(::Process::CLOCK_REALTIME, :second)
+      WORK_STATE.set(tid, queue, jobstr, run_at)
 
       begin
         yield
