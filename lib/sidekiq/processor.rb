@@ -73,6 +73,7 @@ module Sidekiq
       # By setting this thread-local, Sidekiq.redis will access +Sidekiq::Capsule#redis_pool+
       # instead of the global pool in +Sidekiq::Config#redis_pool+.
       Thread.current[:sidekiq_capsule] = @capsule
+      @tid = tid
 
       process_one until @done
       @callback.call(self)
@@ -282,7 +283,7 @@ module Sidekiq
     WORK_STATE = SharedWorkState.new
 
     def stats(jobstr, queue)
-      WORK_STATE.set(tid, {queue: queue, payload: jobstr, run_at: Time.now.to_i})
+      WORK_STATE.set(@tid, {queue: queue, payload: jobstr, run_at: Time.now.to_i})
 
       begin
         yield
@@ -290,7 +291,7 @@ module Sidekiq
         FAILURE.incr
         raise
       ensure
-        WORK_STATE.delete(tid)
+        WORK_STATE.delete(@tid)
         PROCESSED.incr
       end
     end
