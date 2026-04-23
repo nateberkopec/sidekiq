@@ -231,21 +231,39 @@ module Sidekiq
     # implement something simple ourselves.
     # https://bugs.ruby-lang.org/issues/14706
     class Counter
+      STRIPE_COUNT = 16
+      STRIPE_MASK = STRIPE_COUNT - 1
+      STRIPE_KEY = :sidekiq_counter_stripe
+
       def initialize
-        @value = 0
-        @lock = Mutex.new
+        @values = Array.new(STRIPE_COUNT, 0)
+        @locks = Array.new(STRIPE_COUNT) { Mutex.new }
+        @index_lock = Mutex.new
+        @next_index = 0
       end
 
       def incr(amount = 1)
-        @lock.synchronize { @value += amount }
+        idx = Thread.current[STRIPE_KEY]
+        unless idx
+          idx = @index_lock.synchronize do
+            current = @next_index
+            @next_index = (current + 1) & STRIPE_MASK
+            current
+          end
+          Thread.current[STRIPE_KEY] = idx
+        end
+
+        @locks[idx].synchronize { @values[idx] += amount }
       end
 
       def reset
-        @lock.synchronize {
-          val = @value
-          @value = 0
-          val
-        }
+        @locks.each_with_index.sum do |lock, idx|
+          lock.synchronize do
+            val = @values[idx]
+            @values[idx] = 0
+            val
+          end
+        end
       end
     end
 
