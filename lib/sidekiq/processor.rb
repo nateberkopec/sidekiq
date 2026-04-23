@@ -37,6 +37,8 @@ module Sidekiq
       @job = nil
       @thread = nil
       @reloader = Sidekiq.default_configuration[:reloader]
+      @reload = @reloader != Sidekiq::Config::DEFAULTS[:reloader]
+      @server_middleware = capsule.server_middleware
       @job_logger = (capsule.config[:job_logger] || Sidekiq::JobLogger).new(capsule.config)
       @retrier = Sidekiq::JobRetry.new(capsule)
     end
@@ -142,14 +144,20 @@ module Sidekiq
                 # constantize the worker and instantiate an instance, we have to call
                 # the Reloader.  It handles code loading, db connection management, etc.
                 # Effectively this block denotes a "unit of work" to Rails.
-                @reloader.call do
+                if @reload
+                  @reloader.call do
+                    klass = Object.const_get(job_hash["class"])
+                    instance = klass.new
+                    instance.jid = job_hash["jid"]
+                    instance._context = self
+                    @retrier.local(instance, jobstr, queue) { yield instance }
+                  end
+                else
                   klass = Object.const_get(job_hash["class"])
                   instance = klass.new
                   instance.jid = job_hash["jid"]
                   instance._context = self
-                  @retrier.local(instance, jobstr, queue) do
-                    yield instance
-                  end
+                  @retrier.local(instance, jobstr, queue) { yield instance }
                 end
               end
             end
@@ -188,7 +196,7 @@ module Sidekiq
       Thread.handle_interrupt(IGNORE_SHUTDOWN_INTERRUPTS) do
         Thread.handle_interrupt(ALLOW_SHUTDOWN_INTERRUPTS) do
           dispatch(job_hash, queue, jobstr) do |instance|
-            config.server_middleware.invoke(instance, job_hash, queue) do
+            @server_middleware.invoke(instance, job_hash, queue) do
               execute_job(instance, job_hash["args"])
             end
           end
