@@ -9,16 +9,26 @@ module Sidekiq
     end
 
     def call(item, queue)
-      start = ::Process.clock_gettime(::Process::CLOCK_MONOTONIC)
-      @logger.info { "start" } unless @skip
+      if @skip
+        yield
+        return
+      end
+
+      start = nil
+      if @logger.info?
+        start = ::Process.clock_gettime(::Process::CLOCK_MONOTONIC)
+        @logger.info { "start" }
+      end
 
       yield
 
-      Sidekiq::Context.add(:elapsed, elapsed(start))
-      @logger.info { "done" } unless @skip
+      if start
+        Sidekiq::Context.add(:elapsed, elapsed(start))
+        @logger.info { "done" }
+      end
     rescue Exception
-      Sidekiq::Context.add(:elapsed, elapsed(start))
-      @logger.info { "fail" } unless @skip
+      Sidekiq::Context.add(:elapsed, elapsed(start || ::Process.clock_gettime(::Process::CLOCK_MONOTONIC)))
+      @logger.info { "fail" } if @logger.info?
       raise
     end
 

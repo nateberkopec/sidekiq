@@ -95,6 +95,18 @@ describe "Job logger" do
     assert_match(/INFO.+: done/, c)
   end
 
+  it "does not emit default job logs below info level" do
+    @logger.level = Logger::WARN
+    jl = Sidekiq::JobLogger.new(@cfg)
+    job = {"class" => "FooJob"}
+
+    jl.prepare(job) do
+      jl.call(job, "queue") {}
+    end
+
+    assert_empty @output.string
+  end
+
   it "tests custom log attributes" do
     @cfg[:logged_job_attributes] << "trace_id"
     jl = Sidekiq::JobLogger.new(@cfg)
